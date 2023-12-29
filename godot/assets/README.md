@@ -1,0 +1,1 @@
+put shamus.com here and rename it into shamus.tres
