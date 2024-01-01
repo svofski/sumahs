@@ -80,6 +80,12 @@ const SPR_CLEAR_2X4_W = 2
 const SPR_CLEAR_2X4_H = 4
 const SPR_CLEAR_2X4 = 0x6d08 # rare source of properly clean bits
 
+const SPR_EXPL_1X = 0x38d0 # 4x8
+const SPR_EXPL_2X = 0x38f0 # 
+const SPR_EXPL_3X = 0x3910
+const SPR_EXPL_4X = 0x3928
+
+
 const ANIMATION_SPEED_MYSTERY = 5
 const ANIMATION_SPEED_EXTRALIFE = 4
 
@@ -173,7 +179,8 @@ class foe_data:
 	var sprite_ofs: int # relative to sprite[0]
 	var dir: int		# moving direction
 	var anim_ctr: int
-	
+
+var num_monsters: int = 0
 var monster_array = []
 
 
@@ -606,6 +613,66 @@ func try_snapjump_x():
 				monster_x = 77
 			check_move_result = 4
 
+func explode_monster():
+	if monster_kind < 0x14:
+		play_sound(0xb600 | ((randomword & 0x7f + 0x122) >> 8))
+		num_monsters -= 1
+		if num_monsters == 0:
+			convert_score_2()
+		convert_score_1()
+		display_score()
+		xorsprite(monster_x, monster_y, 4, 8, SPR_EXPL_1X)
+		monster_kind = 0x14
+		return
+	if monster_kind < 0x1e:
+		play_sound((randomword >> 1 & 0x7f) + 300)
+		xorsprite(monster_x, monster_y, 4, 8, SPR_EXPL_1X)
+		xorsprite(monster_x, monster_y, 4, 8, SPR_EXPL_2X)
+		monster_kind = 0x1e
+		return
+	if monster_kind < 0x28:
+		play_sound((randomword >> 2 & 0xff) + 200)
+		xorsprite(monster_x, monster_y, 4, 8, SPR_EXPL_2X)
+		monster_anim_ctr = 0
+		play_sound(0)
+		return
+	# 0x28 -- snap jumper 
+	if monster_kind < 0x32:	
+		xorsprite(monster_x, monster_y, 3, 8, SPR_EXPL_3X)
+		monster_kind = 0x32
+		ror_randomword()
+		play_sound((randomword & 0x7f) + 0x190)
+		return
+	if monster_kind < 0x33:
+		play_sound(0x1770)
+		num_monsters -= 1
+		if num_monsters == 0:
+			convert_score_2()
+		convert_score_1()
+		display_score()
+		play_sound(0x186)
+		xorsprite(monster_x, monster_y, 3, 8, SPR_EXPL_3X)
+		xorsprite(monster_x, monster_y, 3, 8, SPR_EXPL_4X)
+		monster_kind = 0x3c
+		return
+		
+	xorsprite(monster_x, monster_y, 3, 8, SPR_EXPL_4X)
+	play_sound(0x15e)
+	monster_anim_ctr = 0
+	play_sound(0)
+	return
+
+var glob_current_monster: int = 0
+
+func save_monster(m: foe_data) -> void:
+	if monster_kind > MONSTERKIND_SNAPJUMPER:
+		print("m: ", glob_current_monster, " kind=%x" % m.kind, " becomes=%x" % monster_kind)
+		m.kind = monster_kind
+	m.x = monster_x
+	m.y = monster_y
+	m.dir = monster_dir
+	m.anim_ctr = monster_anim_ctr
+
 func process_monsters():
 	var monster_width = 4
 	var monster_height = 8
@@ -613,6 +680,7 @@ func process_monsters():
 	var evil_count = MONSTER_PROCESSING_LIMIT
 	ror_randomword()
 	for current_monster in 25:
+		glob_current_monster = current_monster
 		var anim_offsets_ptr = 0
 		evil_count -= 1
 		if evil_count < 0:
@@ -676,14 +744,18 @@ func process_monsters():
 				monster_width = 3
 				anim_offsets_ptr = 0
 				si = SPR_SNAPJUMPER[0]
-			0x28:
-				continue
+			#0x28:
+			
+		if m.kind > MONSTERKIND_SNAPJUMPER:
+			if monster_anim_ctr > 0:
+				explode_monster()
+				save_monster(m)
+			continue
 				
 		if m.kind == MONSTERKIND_SNAPJUMPER:
 			xorsprite_collision_sj(monster_x, monster_y, monster_width, monster_height, si + m.sprite_ofs)
 			xorsprite(monster_x, monster_y + 1, SPR_SJEYES_W, SPR_SJEYES_H, SPR_SJEYES + get_byte(monster_dir + SJ_EYE_OFFSETS))
 			
-			#collision = false
 			if collision:
 				m.kind = 0x28 # mark for exploding later
 				continue
@@ -707,19 +779,13 @@ func process_monsters():
 				monster_anim_ctr = (randomword & 7) + 5
 				ror_randomword()
 				monster_dir = randomword & 15
-			xorsprite(monster_x, monster_y +1, SPR_SJEYES_W, SPR_SJEYES_H, SPR_SJEYES + get_byte(monster_dir + SJ_EYE_OFFSETS))
-				
-			m.x = monster_x
-			m.y = monster_y	# see try_vert_move
-			m.dir = monster_dir
-			m.anim_ctr = monster_anim_ctr
-				
+			xorsprite(monster_x, monster_y +1, SPR_SJEYES_W, SPR_SJEYES_H, SPR_SJEYES + get_byte(monster_dir + SJ_EYE_OFFSETS))				
+			save_monster(m)
 			continue
-			
-				
 				
 		# L2e61_proceed_monster
 		
+		# regular monstre
 		# wipe old sprite
 		xorsprite(monster_x, monster_y, monster_width, monster_height, si + m.sprite_ofs)
 		if m.kind == MONSTERKIND_ROBODROID:
@@ -747,20 +813,15 @@ func process_monsters():
 		si += al
 		monster_x = (m.x + get_byte(bx + 1)) & 0xff
 		xorsprite_collision(monster_x, monster_y, monster_width, monster_height, si)
-		#setpixel(monster_x * 4, monster_y, 1) # non-colliding for monsters
-		#setpixel(100, 100, 3)
 		if collision:
-			m.kind = 0xa
+			monster_kind = 0xa
 			xorsprite(monster_x, monster_y, monster_width, monster_height, si)
 		if monster_width == 2:
 			pass # some wtf? what has width 2?
 		
 		# save monster
-		m.x = monster_x
-		m.y = monster_y	# see try_vert_move
+		save_monster(m)
 		m.sprite_ofs = al
-		m.dir = monster_dir
-		m.anim_ctr = monster_anim_ctr
 
 func paint_bullets():
 	pass
@@ -1087,7 +1148,7 @@ func random_spawn_loc() -> Vector2:
 	var x = get_byte(POWERUP_POSITIONS_TABLE + r  + 1)
 	return Vector2(x, y)
 
-func place_monster(ah, al, index: int, kind: int, sprite: int) -> void:
+func place_monster(ah, al, index: int, kind: int, sprite: int, ofs_bx: int) -> void:
 	monster_array[index].kind = kind
 	var x = 0
 	var y = 0
@@ -1099,20 +1160,16 @@ func place_monster(ah, al, index: int, kind: int, sprite: int) -> void:
 		var xy = random_spawn_loc()
 		x = xy[0]
 		y = xy[1]
-	var bx = randomword & 0x1e
-	y += get_byte(PLACEMENT_OFFSET + bx)
-	x += get_byte(PLACEMENT_OFFSET + bx + 1)
+	#var bx = randomword & 0x1e
+	y += get_byte(PLACEMENT_OFFSET + ofs_bx)
+	x += get_byte(PLACEMENT_OFFSET + ofs_bx + 1)
 	
 	monster_array[index].y = y
 	monster_array[index].x = x
 	monster_array[index].sprite_ofs = 0
 	monster_array[index].dir = 0
 	monster_array[index].anim_ctr = 1
-	
-	bx += 2
-	if bx > 0x22:
-		bx = 0
-		
+			
 	var sprite_width = 4
 	if kind == MONSTERKIND_SNAPJUMPER:
 		sprite_width = 3
@@ -1121,58 +1178,59 @@ func place_monster(ah, al, index: int, kind: int, sprite: int) -> void:
 		movsprite(x, y, sprite_width, 8, sprite)
 	else:
 		xorsprite(x, y, sprite_width, 8, sprite)
+	
+	print("place_monster (%d,%d) kind=%d" % [x, y, kind])
 
 func spawn_monsters(ah, al):
 	update_randomword()
 	
 	var current_monster = 0
+	# offset into PLACEMENT_OFFSET[] array, modulo 0x24?
+	# 2c5d cmp bx, 0x22
+	#      jle over
+	#      mov bx, 0
+	# increments by 2 (x,y) while placing all monsters
+	var ofs_bx = randomword & 0x1e
 	
-	# debug tv hack
-	if false:
-		var n = ((al & 1) + 1 + advanced_mode + (wallpat_n >> 1))
+	# spawn spiraldronebi
+	if true:
+		var n = randomword & 0xff
+		if room_num > 1:
+			n &= 3
+			n += advanced_mode
+		else:
+			n = 1 + advanced_mode
 		if n == 0:
 			n = 1
 		if room_num > 99:
 			n = n + 1 + advanced_mode
+			
 		for i in n:
-			place_monster(ah, al, current_monster, MONSTERKIND_SNAPJUMPER, SPR_SNAPJUMPER[0])
+			place_monster(ah, al, current_monster, MONSTERKIND_SPIRALDRONE2, SPR_SPIRALDRONE2[0], ofs_bx)
+			ofs_bx += 2
+			if ofs_bx > 0x22:
+				ofs_bx = 0
 			current_monster += 1
 			ror_randomword()
-			
-		monster_array[current_monster].kind = 0xff
-		return
-		
-	
-	
-	
-	# spawn spiraldronebi
-	var num_drones
-	if room_num < 2:
-		num_drones = advanced_mode + 1
-	else:
-		num_drones = al & 3
-		num_drones += advanced_mode
-	if num_drones < 1:
-		num_drones = 1
-		
-	for i in num_drones:
-		place_monster(ah, al, current_monster, MONSTERKIND_SPIRALDRONE2, SPR_SPIRALDRONE2[0])
-		current_monster += 1
-		ror_randomword()
 	
 	# spiraldrone3
-	if room_num < 0xb:
-		num_drones = al & 1
-	else:
-		num_drones = al & 3
-	num_drones = num_drones + 1 + advanced_mode
-	if num_drones <= 0:
-		num_drones = 1
+	if true:
+		var n = randomword & 0x255
+		if room_num > 10:
+			n &= 3
+		else:
+			n &= 1
+		n = n + 1 + advanced_mode
+		if n == 0:
+			n = 1
 
-	for i in num_drones:
-		place_monster(ah, al, current_monster, MONSTERKIND_SPIRALDRONE3, SPR_SPIRALDRONE3[0])
-		current_monster += 1
-		ror_randomword()
+		for i in n:
+			place_monster(ah, al, current_monster, MONSTERKIND_SPIRALDRONE3, SPR_SPIRALDRONE3[0], ofs_bx)
+			ofs_bx += 2
+			if ofs_bx > 0x22:
+				ofs_bx = 0
+			current_monster += 1
+			ror_randomword()
 		
 	# robo-droids
 	if room_num > 5:
@@ -1180,7 +1238,10 @@ func spawn_monsters(ah, al):
 		if n == 0:
 			n = 1
 		for i in n:
-			place_monster(ah, al, current_monster, MONSTERKIND_ROBODROID, SPR_ROBODROID[0])
+			place_monster(ah, al, current_monster, MONSTERKIND_ROBODROID, SPR_ROBODROID[0], ofs_bx)
+			ofs_bx += 2
+			if ofs_bx > 0x22:
+				ofs_bx = 0
 			current_monster += 1
 			ror_randomword()
 			
@@ -1192,11 +1253,15 @@ func spawn_monsters(ah, al):
 		if room_num > 99:
 			n = n + 1 + advanced_mode
 		for i in n:
-			place_monster(ah, al, current_monster, MONSTERKIND_SNAPJUMPER, SPR_SNAPJUMPER[0])
+			place_monster(ah, al, current_monster, MONSTERKIND_SNAPJUMPER, SPR_SNAPJUMPER[0], ofs_bx)
+			ofs_bx += 2
+			if ofs_bx > 0x22:
+				ofs_bx = 0			
 			current_monster += 1
 			ror_randomword()
 			
 	monster_array[current_monster].kind = 0xff
+	num_monsters = current_monster
 
 func compute_powerup_location(ah, al):
 	if ah & SCARY_ROOM_BIT:
@@ -1267,9 +1332,14 @@ func check_powerup():
 	pass
 
 func play_sound(divider):
-	var hz = 1.1931816666e6 / divider
+	if divider > 0:
+		var hz = 1.1931816666e6 / divider
 	pass
 	
+func convert_score_1():
+	pass
+func convert_score_2():
+	pass
 func convert_score_3():
 	pass
 	
@@ -1328,6 +1398,14 @@ func animate_powerup():
 					time_until_shadow = 100
 				pass
 			POWERUP_EXTRALIFE:
+				xorsprite(powerup_x, powerup_y, SPR_EXTRALIFE_W, SPR_EXTRALIFE_H, SPR_EXTRALIFE)
+				xorsprite(powerup_x, powerup_y + SPR_EXTRALIFE_H, SPR_EXTRALIFE_W, SPR_EXTRALIFE_H, SPR_EXTRALIFE + powerup_animation_offset)
+				
+				animation_counter = 0x28
+				picked_powerup_kind = POWERUP_EXTRALIFE
+				lives_remaining += 1
+				draw_lives()
+				play_sound(0x27bf)
 				pass
 			POWERUP_KEY:
 				xorsprite(powerup_x, powerup_y, SPR_KEY_W, SPR_KEY_H, SPR_KEY + powerup_animation_offset)
@@ -1430,14 +1508,14 @@ func animate_scary_room():
 	
 	if slit_y < 0x12:
 		return
-		
+
 	y = y - 10
 	xground(0x1f, y, 4, 1, 1, 1, PAT4X8_VSTRIPES, PAT4X8_VSTRIPES)
 	xground(0x2f, y, 4, 1, 1, 1, PAT4X8_VSTRIPES, PAT4X8_VSTRIPES)
 
 func update_randomword():
 	randomword = randi() & 0xffff
-	
+
 func ror_randomword():
 	var c = randomword & 1
 	randomword >>= 1
@@ -1489,7 +1567,7 @@ func _ready():
 	updateTexture()
 	load_data()
 	
-	room_num = 0
+	room_num = 0 #18 #37
 	player_x = 2
 	player_y = 0x5c
 	player_entry_x = player_x
