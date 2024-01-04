@@ -25,6 +25,8 @@ var intarray : PoolIntArray
 const cga_stride : int = 320/4
 const cga_field_size : int = cga_stride * 100
 
+var sound_enabled: bool = true
+var sfx_priority: int = 1
 
 var shamuscom : PoolByteArray
 const PATTERN_TABLE : int = 0x0105
@@ -85,6 +87,7 @@ const SPR_EXPL_2X = 0x38f0 #
 const SPR_EXPL_3X = 0x3910
 const SPR_EXPL_4X = 0x3928
 
+const SPR_IONSHIVS = 0x7e70
 
 const ANIMATION_SPEED_MYSTERY = 5
 const ANIMATION_SPEED_EXTRALIFE = 4
@@ -116,14 +119,20 @@ const SPR_SJEYES_H = 3
 const SPR_SJEYES = 0x71a6 # 3x20
 const SJ_EYE_OFFSETS = 0x71e5
 
-
 const PAT4X8_VSTRIPES : int = 0x66da
+
+#  1000:0126 e6 dc d2 c8 be aa 
+const GOBACK_TABLE: int = 0x0126
 
 # powerup kinds, stored in gamestate_a & 3
 const POWERUP_EXTRALIFE = 1
 const POWERUP_MYSTERY = 2
 const POWERUP_KEY = 3
 const POWERUP_KEYHOLE = 4
+
+const DIR_TO_SHIV_OFFSET = 0x293e
+const DIR_TO_SHIV_SPRITE = 0x2962
+const DIR_TO_SHIV_SZ = 0x2950 # width and total number of bytes
 
 var patspr_a: int
 var patspr_b: int
@@ -136,15 +145,17 @@ var advanced_mode: int = 0
 var room_num: int = 0
 var powerup_present: int = 0
 var time_until_shadow: int = 0
-var special_monster_flag: int = 0
+var scary_room_flag: int = 0
 var slit_y: int = 0
 var door_location: int = 0
 var animation_counter: int = 0
 var picked_powerup_kind: int = 0
 
 var collision: bool = false
-
 var lives_remaining: int = 5
+var collision_absolvence: int = 0
+var deathroll: int = 0
+const DEATHROLL_TIME = 10
 
 var player_x: int = 0
 var player_y: int = 0
@@ -172,6 +183,8 @@ var sliding_freq: int = 0
 
 var randomword: int = 0
 
+var goback_num: int = 0 # mystery counter
+
 class foe_data:
 	var kind: int
 	var y: int
@@ -179,9 +192,33 @@ class foe_data:
 	var sprite_ofs: int # relative to sprite[0]
 	var dir: int		# moving direction
 	var anim_ctr: int
+	
+class shiv_data:
+	var active: int
+	var x: int
+	var y: int
+	var dir: int
+	var f4: int
+	
+class bullet_data:
+	var active: int
+	var x: int
+	var y: int
+	var dir: int
+	var f4: int
 
 var num_monsters: int = 0
 var monster_array = []
+
+var num_flying_bullets = 0
+var bullets_not_fired = 0
+var bullets_array = [bullet_data.new(), bullet_data.new(), bullet_data.new(), bullet_data.new(), bullet_data.new()]
+var bulletfire_delay_initval = 0
+var bulletfire_delay = 0
+
+
+var num_shivs: int = 0
+var shivs_array = [shiv_data.new(), shiv_data.new()]
 
 
 var monster_kind = 0
@@ -196,9 +233,9 @@ var monster_y = 0
 
 # player directions
 const DIR_0: int = 0
-const DIR_NE: int = 1
+const DIR_NW: int = 1
 const DIR_N: int = 2
-const DIR_NW: int = 3
+const DIR_NE: int = 3
 const DIR_W: int = 4
 const DIR_E: int = 5
 const DIR_SW: int = 6
@@ -298,6 +335,16 @@ func b800_to_truecolor():
 var mem_image
 var mem_texture
 
+func set_cga_palette(n: int, intensity: int) -> void:
+	var pal
+	match n:
+		0: pal = [Color(0, 0, 0, 0), Color(0.0, 0.625, 0.0, 1.0), Color(0.625, 0.0, 0.0, 1.0), Color(0.625, 0.3125, 0.0, 1.0)]
+		1: pal = [Color(0, 0, 0, 0), Color(0.0, 0.625, 0.625, 1.0), Color(0.625, 0.0, 0.625, 1.0), Color(0.625, 0.625, 0.625, 1.0)]
+	$CgaTextureRect.material.set_shader_param("palette_0", pal[0])
+	$CgaTextureRect.material.set_shader_param("palette_1", pal[1])
+	$CgaTextureRect.material.set_shader_param("palette_2", pal[2])
+	$CgaTextureRect.material.set_shader_param("palette_3", pal[3])
+
 func updateTexture():
 	# dummy texture
 	if textureImage == null:
@@ -318,6 +365,7 @@ func updateTexture():
 			Texture.FLAG_VIDEO_SURFACE)
 
 	$CgaTextureRect.material.set_shader_param("b800", mem_texture)
+	set_cga_palette(1, 0)
 
 	mem_image.data.data = b800
 	mem_texture.set_data(mem_image)
@@ -391,6 +439,20 @@ func xorsprite_collision(x0, y0, w, h, src):
 			b800[get_cga_addr(x + x0, y + y0)] ^= shamuscom[si]
 			si += 1
 
+# check collision AFTER xor
+func xorsprite_collision_shiv(x0, y0, w, h, src):
+	collision = false
+	var di = src - 0x100
+	for y in h:
+		for x in w:
+			var addr = get_cga_addr(x + x0, y + y0)
+			var b = shamuscom[di]
+			b800[addr] ^= b
+			if b & b800[addr] & 0xaa != 0:
+				collision = true
+			di += 1
+			
+
 
 func xorsprite_collision_sj(x0, y0, w, h, src):
 	collision = false
@@ -414,6 +476,9 @@ func xorsprite_collision_sj(x0, y0, w, h, src):
 
 func xorplayer(src):
 	xorsprite(player_x, player_y, SPR_SHAMUS_W, SPR_SHAMUS_H, src)
+
+func xorplayer_collision(src):
+	xorsprite_collision(player_x, player_y, SPR_SHAMUS_W, SPR_SHAMUS_H, src)
 
 func room_to_pattern(room_n: int) -> void:
 	#pattern_table
@@ -825,8 +890,89 @@ func process_monsters():
 
 func paint_bullets():
 	pass
+	
 func process_shivs():
-	pass
+	if num_shivs == 0:
+		return
+	var flg42c2: int = 2
+	for s in shivs_array:
+		if not s.active:
+			continue
+		s.f4 += 6
+		var bx = s.f4 << 2
+		
+		if animation_counter == 0 and sfx_priority == 0:
+			play_sound(bx)
+		
+		var out = false
+		
+		match s.dir:
+			0:	# impossibru
+				pass
+			1:
+				xorsprite_collision_shiv(s.x, s.y, 2, 12/2, SPR_IONSHIVS)
+				if not collision and (s.x < 1  or s.y < 4):
+					out = true
+				if not collision and not out:
+					s.x -= 1
+					s.y -= 4
+					xorsprite(s.x, s.y, 2, 12/2, SPR_IONSHIVS)
+			2:	
+				xorsprite_collision_shiv(s.x, s.y, 2, 14/2, SPR_IONSHIVS + 12)
+				if not collision and s.y < 4:
+					out = true
+				if not collision and not out:
+					s.y -= 4
+					xorsprite(s.x, s.y, 2, 14/2, SPR_IONSHIVS + 12)
+			3:	
+				xorsprite_collision_shiv(s.x, s.y, 2, 12/2, SPR_IONSHIVS + 26)
+				if not collision and (s.y < 4 or s.x > 76):
+					out = true
+				if not collision and not out:
+					s.x += 1
+					s.y -= 4
+					xorsprite(s.x, s.y, 2, 12/2, SPR_IONSHIVS + 26)
+			4:	
+				xorsprite_collision_shiv(s.x, s.y, 2, 10/2, SPR_IONSHIVS + 38)
+				if not collision and s.x < 2:
+					out = true
+				if not collision and not out:
+					s.x -= 2
+					xorsprite(s.x, s.y, 2, 10/2, SPR_IONSHIVS + 38)
+			5:	
+				xorsprite_collision_shiv(s.x, s.y, 2, 10/2, SPR_IONSHIVS + 48)
+				if not collision and s.x > 76:
+					out = true
+				if not collision and not out:
+					s.x += 2
+					xorsprite(s.x, s.y, 2, 10/2, SPR_IONSHIVS + 48)
+			6:
+				xorsprite_collision_shiv(s.x, s.y, 2, 12/2, SPR_IONSHIVS + 58)
+				if not collision and (s.x < 1 or s.y > 168):
+					out = true
+				if not collision and not out:
+					s.x -= 1
+					s.y += 4
+					xorsprite(s.x, s.y, 2, 12/2, SPR_IONSHIVS + 58)
+			7:	
+				xorsprite_collision_shiv(s.x, s.y, 2, 12/2, SPR_IONSHIVS + 70)
+				if not collision and (s.y > 168):
+					out = true
+				if not collision and not out:
+					s.y += 4
+					xorsprite(s.x, s.y, 2, 14/2, SPR_IONSHIVS + 70)
+			8:	
+				xorsprite_collision_shiv(s.x, s.y, 2, 12/2, SPR_IONSHIVS + 84)
+				if not collision and (s.x > 76 or s.y > 168):
+					out = true
+				if not collision and not out:
+					s.x += 1
+					s.y += 4
+					xorsprite(s.x, s.y, 2, 12/2, SPR_IONSHIVS + 84)
+		if collision or out:
+			s.active = 0
+			num_shivs -= 0	
+
 func move_bullets():
 	pass
 func check_shadow_entrance():
@@ -859,6 +1005,75 @@ func player_set_dir():
 	elif joystick[JOY_RIGHT]:
 		player_dir = DIR_E
 	
+func process_deathroll():
+	print("process_deathroll()")
+	
+
+#class shiv_data:
+#0	var active: int  
+#1	var x: int
+#2	var y: int
+#3	var dx: int
+#4	var dy: int
+	
+func xorshiv(s: shiv_data) -> void:
+	var sprite = get_word(DIR_TO_SHIV_SPRITE + s.dir * 2)
+	var width = get_byte(DIR_TO_SHIV_SZ + s.dir * 2)
+	var nbytes = get_byte(DIR_TO_SHIV_SZ + s.dir * 2 + 1)
+	var height = int(nbytes / width)	
+	xorsprite(s.x, s.y, width, height, sprite)
+	
+	
+func fire_shiv() -> void:
+	xorplayer(sprite_ptr)
+	xorplayer_collision(sprite_ptr)
+	if collision and not collision_absolvence:
+		deathroll = DEATHROLL_TIME
+		
+	if (animation_counter == 0) and (sfx_priority == 0):
+		play_sound(0x96)
+
+	# i really can't parse what is going on at cs:29f2, the condition checks shivs_data[4], but it makes no sense
+	# here i'm just picking a free shiv slot
+	var s: shiv_data = null
+	for i in 2:
+		if not shivs_array[i].active:
+			s = shivs_array[i]
+			break
+	if s == null:
+		return
+	
+	s.dir = player_dir
+	var x = (player_x + get_byte(DIR_TO_SHIV_OFFSET + player_dir * 2)) & 255
+	if x <= 0 or x > 78:
+		return # not fired
+	s.x = x
+	
+	var y = (player_y + get_byte(DIR_TO_SHIV_OFFSET + player_dir * 2 + 1)) & 255
+	if y <= 0 or y > 180:
+		return
+	s.y = y
+	
+	s.f4 = 0x11	# wtf is this...
+	
+	#var sprite = get_word(DIR_TO_SHIV_SPRITE + s.dir * 2)
+	#var width = get_byte(DIR_TO_SHIV_SZ + s.dir * 2)
+	#var nbytes = get_byte(DIR_TO_SHIV_SZ + s.dir * 2 + 1)
+	#var height = int(nbytes / width)	
+	#xorsprite(s.x, s.y, width, height, sprite)
+	xorshiv(s)
+	s.active = 1
+
+	if animation_counter == 0 and sfx_priority == 0:
+		if sound_enabled:
+			play_sound(0xb4)
+		# mystery delay()
+		if sound_enabled:
+			play_sound(0xdc)
+		# mystery delay()
+
+	num_shivs = max(num_shivs + 1, 2)
+
 func anim_player(dx, dy, f1, f2) -> void:
 	xorplayer(sprite_ptr)
 	player_x += dx
@@ -867,7 +1082,7 @@ func anim_player(dx, dy, f1, f2) -> void:
 		sprite_ptr = SPR_SHAMUS[f2]
 	else:
 		sprite_ptr = SPR_SHAMUS[f1]
-	xorplayer(sprite_ptr)
+	xorplayer_collision(sprite_ptr)
 		
 func player_walk() -> void:
 	match player_dir:
@@ -923,16 +1138,25 @@ func player_walk() -> void:
 				anim_player(1, 2, 7, 8)
 
 func process_player():
+	if deathroll:
+		process_deathroll()
+		return
+	collision = false
 	player_set_dir()
 	player_walk()
+	if collision and not collision_absolvence:
+		player_set_dir()
+		player_walk()
+		deathroll = DEATHROLL_TIME
 
 # Called every frame. 'delta' is the elapsed time since the previous frame.
 
 func _process(delta):
-	if special_monster_flag and powerup_present:
+	# cs:0236
+	if scary_room_flag and powerup_present:
 		animate_scary_room()
-	
-	check_powerup()
+		process_scary_room()
+		
 	process_monsters()
 	paint_bullets()
 	process_shivs()
@@ -948,8 +1172,11 @@ func _process(delta):
 	if animation_counter > 0:
 		if picked_powerup_kind == POWERUP_KEYHOLE:
 			open_locked_door()
-		
-	process_player()
+	if joystick[JOY_FIRE] and player_dir != 0:
+		fire_shiv()
+		joystick[JOY_FIRE] = 0
+	else:
+		process_player()
 	
 	updateTexture()
 
@@ -1054,7 +1281,7 @@ func draw_inner_walls(al, ah) -> void:
 
 func scary_room():
 	time_until_shadow = 700
-	special_monster_flag = 1
+	scary_room_flag = 1
 	slit_y = 7
 	
 	ground(0x1f, 8, 4, 8, 1, 0x14, PAT4X8_VSTRIPES, PAT4X8_VSTRIPES)
@@ -1174,12 +1401,16 @@ func place_monster(ah, al, index: int, kind: int, sprite: int, ofs_bx: int) -> v
 	if kind == MONSTERKIND_SNAPJUMPER:
 		sprite_width = 3
 	
-	if special_monster_flag == 0:
+	if scary_room_flag == 0:
 		movsprite(x, y, sprite_width, 8, sprite)
 	else:
 		xorsprite(x, y, sprite_width, 8, sprite)
 	
 	print("place_monster (%d,%d) kind=%d" % [x, y, kind])
+
+func clear_monsters():
+	num_monsters = 0
+	monster_array[0].kind = 0xff
 
 func spawn_monsters(ah, al):
 	update_randomword()
@@ -1328,8 +1559,35 @@ func place_powerup(ah, al):
 			powerup_kind = POWERUP_KEYHOLE
 		key_for_room()
 
-func check_powerup():
-	pass
+func process_scary_room():
+	if time_until_shadow == 0:
+		return
+	if not powerup_present:
+		return
+	var bob = 0
+	
+	if powerup_kind == POWERUP_KEY:
+		xorsprite_collision(powerup_x, powerup_y, SPR_MYSTERY_W, SPR_MYSTERY_H, SPR_KEY + powerup_animation_offset)
+		xorsprite(powerup_x, powerup_y, SPR_MYSTERY_W, SPR_MYSTERY_H, SPR_KEY + powerup_animation_offset)
+		
+	# hit the powerup -> makes this room regular
+	# clear the bars, spawn monsters
+	if collision:
+		xorplayer(sprite_ptr)
+
+		ground(0x1f, 8, 4, 8, 1, 0x14, SPR_CLEAR_2X4, SPR_CLEAR_2X4)
+		ground(0x2f, 8, 4, 8, 1, 0x14, SPR_CLEAR_2X4, SPR_CLEAR_2X4)
+
+		for s in shivs_array:
+			if s.active:
+				xorshiv(s)
+			s.active = 0
+		num_shivs = 0
+		
+		xorplayer(sprite_ptr)
+		
+		scary_room_flag = false
+		spawn_monsters(0x03, 0x00)
 
 func play_sound(divider):
 	if divider > 0:
@@ -1447,10 +1705,37 @@ func animate_powerup():
 		set_gamestate_b(room_num, get_gamestate_b(room_num) & 0xfd)
 		powerup_present = 0
 
+func reset_shivs():
+	num_shivs = 0
+	for i in len(shivs_array):
+		shivs_array[i].active = 0
+
+func reset_bullets():	
+	num_flying_bullets = 0
+	bullets_not_fired = 0
+	for i in len(bullets_array):
+		bullets_array[i].active = 0
+
+	if goback_num < 1:
+		if goback_num < 0:
+			goback_num = 0
+			return
+		goback_num = 1
+
+	if goback_num > 6:
+		goback_num = 6
+
+	bulletfire_delay_initval = (randomword & 0xf) + get_byte(GOBACK_TABLE + goback_num)
+	bulletfire_delay_initval = bulletfire_delay_initval - 0xf
+	bulletfire_delay = bulletfire_delay_initval
+	if advanced_mode:
+		bulletfire_delay_initval = bulletfire_delay_initval - 0xf
+		bulletfire_delay = bulletfire_delay_initval	
+
 func enter_room(n: int) -> void:
 	update_randomword()
 
-	special_monster_flag = 0
+	scary_room_flag = 0
 	powerup_present = 0
 	available_exits = 0
 	if advanced_mode == 0:
@@ -1464,6 +1749,9 @@ func enter_room(n: int) -> void:
 
 	var al = get_gamestate_a(n)
 	var ah = get_gamestate_b(n)
+	
+	reset_shivs()
+	reset_bullets()
 	
 	powerup_present = al & 3 != 0
 	if powerup_present && (ah & 2 != 0):
@@ -1481,8 +1769,10 @@ func enter_room(n: int) -> void:
 	elif n == 127:
 		seal_room_right()
 	
-	if ah & 2 == 0:	# scary room
+	clear_monsters()
+	if not scary_room_flag:
 		spawn_monsters(ah, al)
+		
 		
 	if powerup_present:
 		place_powerup(ah, al)
@@ -1544,6 +1834,8 @@ func _input(event):
 					joystick[JOY_RIGHT] = 1
 				elif event.scancode == KEY_S:
 					joystick[JOY_DOWN] = 1
+				elif event.scancode in [KEY_CONTROL, KEY_ALT, KEY_SPACE]:
+					joystick[JOY_FIRE] = 1
 		else:
 			if event.scancode == KEY_W:
 				joystick[JOY_UP] = 0
@@ -1553,6 +1845,9 @@ func _input(event):
 				joystick[JOY_RIGHT] = 0
 			elif event.scancode == KEY_S:
 				joystick[JOY_DOWN] = 0
+			elif event.scancode in [KEY_CONTROL, KEY_ALT, KEY_SPACE]:
+				joystick[JOY_FIRE] = 0
+				
 
 
 # Called when the node enters the scene tree for the first time.
@@ -1567,7 +1862,7 @@ func _ready():
 	updateTexture()
 	load_data()
 	
-	room_num = 0 #18 #37
+	room_num = 19 #18 #37
 	player_x = 2
 	player_y = 0x5c
 	player_entry_x = player_x
