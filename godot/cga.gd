@@ -13,7 +13,12 @@ extends Panel
 var texture : ImageTexture
 var textureImage : Image
 
+var sample_hz = 22050.0 # Keep the number of samples to mix low, GDScript is not super fast.
+var pulse_hz = 0
+var phase = 0.0
+
 onready var cgatr : TextureRect = $CgaTextureRect
+var playback: AudioStreamPlayback = null
 
 # cga bits, 2 bits per pixel, interlaced
 var b800 : PoolByteArray
@@ -24,6 +29,8 @@ var intarray : PoolIntArray
 
 const cga_stride : int = 320/4
 const cga_field_size : int = cga_stride * 100
+
+var cur_cga_palette: int = 0
 
 var sound_enabled: bool = true
 var sfx_priority: int = 1
@@ -88,6 +95,11 @@ const SPR_EXPL_3X = 0x3910
 const SPR_EXPL_4X = 0x3928
 
 const SPR_IONSHIVS = 0x7e70
+
+const SFX_MARCH_PITCH = 0x4dc0
+const SFX_MARCH_DURATION = 0x4f68
+const SFX_DED_PITCH = 0x510e
+const SFX_DED_DURATION = 0x5120
 
 const ANIMATION_SPEED_MYSTERY = 5
 const ANIMATION_SPEED_EXTRALIFE = 4
@@ -287,7 +299,6 @@ func set_gamestate_b(room: int, val: int) -> void:
 
 # ABGR
 const cga_palette_bob = [0xff000000, 0xff00aa00, 0xff0000aa, 0xff0055aa]
-
 const cga_palette: PoolIntArray = PoolIntArray(cga_palette_bob)
 
 var spb = StreamPeerBuffer.new()
@@ -365,7 +376,7 @@ func updateTexture():
 			Texture.FLAG_VIDEO_SURFACE)
 
 	$CgaTextureRect.material.set_shader_param("b800", mem_texture)
-	set_cga_palette(1, 0)
+	set_cga_palette(cur_cga_palette, 0)
 
 	mem_image.data.data = b800
 	mem_texture.set_data(mem_image)
@@ -1007,6 +1018,12 @@ func player_set_dir():
 	
 func process_deathroll():
 	print("process_deathroll()")
+	if deathroll > 0:
+		cur_cga_palette = deathroll & 1
+		deathroll -= 1
+		
+		if deathroll == 0:
+			deathroll = -1
 	
 
 #class shiv_data:
@@ -1151,7 +1168,25 @@ func process_player():
 
 # Called every frame. 'delta' is the elapsed time since the previous frame.
 
+const FRAMESKIP_N = 3
+var frameskip: int = FRAMESKIP_N
+var framedelta: float = 0
+
 func _process(delta):
+	#print(delta)
+	#framedelta += delta
+	#if framedelta > 1/50:
+	#	framedelta -= 1/50
+	#	frameskip -= 1
+	player_play()
+	
+	frameskip -= 1	
+	if frameskip > 0:
+		return
+		
+	frameskip = FRAMESKIP_N
+
+	_fill_buffer()
 	# cs:0236
 	if scary_room_flag and powerup_present:
 		animate_scary_room()
@@ -1177,6 +1212,9 @@ func _process(delta):
 		joystick[JOY_FIRE] = 0
 	else:
 		process_player()
+	
+	if deathroll == -1:
+		next_life()
 	
 	updateTexture()
 
@@ -1589,11 +1627,6 @@ func process_scary_room():
 		scary_room_flag = false
 		spawn_monsters(0x03, 0x00)
 
-func play_sound(divider):
-	if divider > 0:
-		var hz = 1.1931816666e6 / divider
-	pass
-	
 func convert_score_1():
 	pass
 func convert_score_2():
@@ -1847,8 +1880,86 @@ func _input(event):
 				joystick[JOY_DOWN] = 0
 			elif event.scancode in [KEY_CONTROL, KEY_ALT, KEY_SPACE]:
 				joystick[JOY_FIRE] = 0
-				
 
+func next_life():
+	lives_remaining -= 1
+	if lives_remaining < 0:
+		restart_game()
+	
+	cls()
+	cur_cga_palette = 0
+	player_x = player_entry_x
+	player_y = player_entry_y
+	sprite_ptr = SPR_SHAMUS[0]
+	deathroll = 0
+	enter_room(room_num)
+
+func restart_game():
+	play_march(SFX_MARCH_PITCH, SFX_MARCH_DURATION)
+	
+	update_randomword()
+	cls()
+	cur_cga_palette = 0
+	updateTexture()
+	
+	room_num = 0#19 #18 #37
+	player_x = 2
+	player_y = 0x5c
+	player_entry_x = player_x
+	player_entry_y = player_y
+	sprite_ptr = SPR_SHAMUS[0]
+	lives_remaining = 5
+	found_keys = [255, 255, 255]
+	deathroll = 0
+	#found_keys = [0x0, 0x30, 0x60]
+	
+	enter_room(room_num)
+
+var player_pitchptr: int = 0
+var player_durptr: int = 0
+var player_playing: int = 0
+var player_duration: int = 0
+
+func play_march(pitches, durations):
+	player_pitchptr = pitches
+	player_durptr = durations
+	player_playing = 1
+
+func player_play():
+	if player_playing:
+		if player_duration > 0:
+			player_duration -= 1
+			return
+		var divider = get_word(player_pitchptr)
+		if divider == 0xffff:
+			play_sound(0)
+			player_playing = false
+			return
+		player_pitchptr += 2
+		player_duration = get_word(player_durptr)  # timing approximation
+		player_durptr += 2
+		play_sound(20280/divider)
+
+func play_sound(divider):
+	if divider > 0:
+		pulse_hz = 1.1931816666e6 / divider / 64 # why extra division
+	else:
+		pulse_hz = 0
+
+func _fill_buffer():
+	var increment = pulse_hz / sample_hz
+
+	var to_fill = playback.get_frames_available()
+	while to_fill > 0:
+		playback.push_frame(Vector2.ONE * pow(sin(phase * TAU), 12)) # Audio frames are stereo.
+		phase = fmod(phase + increment, 1.0)
+		to_fill -= 1
+
+func init_playback():
+	$Player.stream.mix_rate = sample_hz
+	playback = $Player.get_stream_playback()
+	_fill_buffer()
+	$Player.play()
 
 # Called when the node enters the scene tree for the first time.
 func _ready():
@@ -1857,25 +1968,14 @@ func _ready():
 	truecolor = PoolByteArray()
 	truecolor.resize(320*200*4)
 	intarray.resize(320 * 200)
-	update_randomword()
-	cls()
-	updateTexture()
+
 	load_data()
-	
-	room_num = 19 #18 #37
-	player_x = 2
-	player_y = 0x5c
-	player_entry_x = player_x
-	player_entry_y = player_y
-	sprite_ptr = SPR_SHAMUS[0]
-	lives_remaining = 5
-	found_keys = [255, 255, 255]
-	#found_keys = [0x0, 0x30, 0x60]
-	
+
 	for i in 26:
 		monster_array.append(foe_data.new())
 
 	# seems to be reasonably close to the original game
-	Engine.set_target_fps(50/3)
-
-	enter_room(room_num)
+	Engine.set_target_fps(50)
+	
+	init_playback()
+	restart_game()
